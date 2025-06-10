@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<title>流式ASR DEMO</title>
+</head>
+
+<body>
+	<button id="startButton">开始录音</button>
+	<button id="stopButton" disabled>停止录音</button>
+	<script>
+		const startButton = document.getElementById('startButton');
+		const stopButton = document.getElementById('stopButton');
+
+		let wsUrl = 'wss://example.com:19443/asr?';
+		const url = new URL(window.location.href);
+		const language = url.searchParams.get("language") || "ko";
+
+		let mediaStream;
+		let audioContext;
+		let processor;
+		let socket;
+		let pcmBuffer = [];
+
+		function initWebsocket() {
+			// WebSocket连接
+			socket = new WebSocket(wsUrl);
+
+			socket.onopen = function () {
+				console.log('Connected to WebSocket server');
+				socket.send(JSON.stringify({
+					sampleRate: 16000,
+					format: "",
+					language: language,
+					silenceTime: 1500,
+					punctuation: true,
+					enableInterimResult: true,
+					startSilenceTime: 4000,
+					chineseDigital: true,
+					sentence: true,
+				}))
+			};
+
+			socket.onerror = function (error) {
+				console.error('WebSocket error:', error);
+			};
+
+			socket.onclose = function (event) {
+				console.log('Disconnected from WebSocket server', event);
+			};
+
+			socket.onmessage = (event) => {
+				console.log("Received data:", event.data);
+				o = JSON.parse(event.data)
+				if (o.data?.finallyResult) {
+					stopRecording();
+				}
+			};
+		};
+
+		const chunkSize = 1600
+		// 开始录音
+		function startRecording() {
+			initWebsocket()
+			navigator.mediaDevices.getUserMedia({ audio: true })
+				.then(stream => {
+					mediaStream = stream;
+					audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+					processor = audioContext.createScriptProcessor(1024, 1, 1);
+
+					processor.onaudioprocess = e => {
+						const leftChannel = e.inputBuffer.getChannelData(0);
+						for (let i = 0; i < leftChannel.length; i++) {
+							const val = Math.max(-1, Math.min(1, leftChannel[i]));
+							pcmBuffer.push(val < 0 ? val * 0x8000 : val * 0x7FFF);
+						}
+						if (socket.readyState === WebSocket.OPEN && pcmBuffer.length >= chunkSize) {
+							const n = pcmBuffer.length;
+							const inputData = pcmBuffer.slice(0, chunkSize);
+							const buffer = new ArrayBuffer(inputData.length * 2);
+							const outputData = new DataView(buffer);
+							for (let i = 0; i < inputData.length; i++) {
+								outputData.setInt16(i * 2, inputData[i], true);
+							}
+							pcmBuffer = pcmBuffer.slice(chunkSize)
+
+							socket.send(outputData);
+						}
+					};
+
+					const source = audioContext.createMediaStreamSource(mediaStream);
+					source.connect(processor);
+					processor.connect(audioContext.destination);
+
+					startButton.disabled = true;
+					stopButton.disabled = false;
+				})
+				.catch(err => {
+					alert(`Error accessing microphone: ${err}`);
+				});
+		}
+
+		// 停止录音
+		function stopRecording() {
+			if (mediaStream) {
+				mediaStream.getTracks().forEach(track => track.stop());
+				mediaStream = null;
+			}
+			if (processor) {
+				processor.disconnect();
+				processor = null;
+			}
+			if (audioContext) {
+				audioContext.close();
+				audioContext = null;
+			}
+			if (socket) {
+				socket.close();
+				socket = null;
+			}
+
+			startButton.disabled = false;
+			stopButton.disabled = true;
+
+			pcmBuffer = [];
+		}
+
+		startButton.onclick = startRecording;
+		stopButton.onclick = stopRecording;
+	</script>
+</body>
+
+</html>
